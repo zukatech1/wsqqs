@@ -1,24 +1,9 @@
--- VMEmitter.lua  (v2 — hardened)
--- Z-Sec VM Emitter
--- Changes vs v1:
---   [1] STRONGER ENCRYPTION  — 4-byte rolling XOR key (was 1-byte)
---   [2] OPCODE SHUFFLE       — logical op IDs permuted randomly each compile
---                              (requires matching permutation passed in from BytecodeCompiler)
---   [3] JUNK INJECTION       — dead locals + unreachable branches in VM body
---   [4] CONTROL FLOW FLATTEN — dispatch table replaces if/elseif chain;
---                              RETURN/JMP use a boxed-PC table so closures
---                              can mutate it without breaking the call frame
-
 local VMEmitter = {}
-
 local Ast           = require("prometheus.ast")
 local Scope         = require("prometheus.scope")
 local util          = require("prometheus.util")
 local randomStrings = require("prometheus.randomStrings")
-
 local AstKind = Ast.AstKind
-
--- ── Helpers (unchanged) ───────────────────────────────────────────────────────
 local function N(v)    return Ast.NumberExpression(v) end
 local function S(v)    return Ast.StringExpression(v) end
 local function Nil()   return Ast.NilExpression() end
@@ -31,11 +16,6 @@ local function Local(scope, vars, vals) return Ast.LocalVariableDeclaration(scop
 local function Ret(vals)  return Ast.ReturnStatement(vals or {}) end
 local function Block(stmts, scope) return Ast.Block(stmts, scope) end
 local function Func(args, body)    return Ast.FunctionLiteralExpression(args, body) end
-
--- ── [1] 4-byte rolling XOR encryption ────────────────────────────────────────
--- Previously used a single XOR key — trivially broken by XOR-ing two outputs.
--- Now uses 4 independent key bytes; decryptor is embedded as a closure in the
--- VM body with the keys as literals, obfuscated further by NumbersToExpressions.
 local function obfuscateBytestring(rawBytes)
     local k1 = math.random(1, 255)
     local k2 = math.random(1, 255)
@@ -50,8 +30,6 @@ local function obfuscateBytestring(rawBytes)
     end
     return table.concat(encStr), k1, k2, k3, k4
 end
-
--- ── Decode map serializer (unchanged) ────────────────────────────────────────
 local function serializeDecodeMap(decodeMap)
     local bytes = {}
     for wire = 0, 255 do
@@ -63,12 +41,6 @@ local function serializeDecodeMap(decodeMap)
     end
     return table.concat(chars)
 end
-
--- ── [2] Opcode ID permutation ─────────────────────────────────────────────────
--- Returns a shuffled O table (name->id).
--- BytecodeCompiler must call this BEFORE serializing and pass the result to both
--- Serializer (so bytecode is written with shuffled IDs) and VMEmitter.emit
--- (so the dispatch table uses the same IDs).
 function VMEmitter.generateOpcodePermutation()
     local opNames = {
         "LOAD_CONST","LOAD_BOOL","LOAD_NIL","MOV",
@@ -97,18 +69,12 @@ function VMEmitter.generateOpcodePermutation()
     end
     return O
 end
-
--- ── Main emitter ──────────────────────────────────────────────────────────────
 function VMEmitter.emit(bytecodeStr, decodeMap, entryProtoId, opcodePermutation)
     local encryptedBytes, k1, k2, k3, k4 = obfuscateBytestring(bytecodeStr)
     local decodeMapStr = serializeDecodeMap(decodeMap)
-
-    -- Use caller-supplied permutation or fall back to a fresh one
     local O = opcodePermutation or VMEmitter.generateOpcodePermutation()
-
     local newGlobalScope = Scope:newGlobal()
     local psc = Scope:new(newGlobalScope, nil)
-
     local _, getfenvVar      = newGlobalScope:resolve("getfenv")
     local _, tableVar        = newGlobalScope:resolve("table")
     local _, unpackVar       = newGlobalScope:resolve("unpack")
@@ -125,7 +91,6 @@ function VMEmitter.emit(bytecodeStr, decodeMap, entryProtoId, opcodePermutation)
     local _, typeVar         = newGlobalScope:resolve("type")
     local _, tostrVar        = newGlobalScope:resolve("tostring")
     local _, tonumVar        = newGlobalScope:resolve("tonumber")
-
     psc:addReferenceToHigherScope(newGlobalScope, getfenvVar, 2)
     psc:addReferenceToHigherScope(newGlobalScope, tableVar)
     psc:addReferenceToHigherScope(newGlobalScope, unpackVar)
@@ -139,7 +104,6 @@ function VMEmitter.emit(bytecodeStr, decodeMap, entryProtoId, opcodePermutation)
     psc:addReferenceToHigherScope(newGlobalScope, pcallVar)
     psc:addReferenceToHigherScope(newGlobalScope, typeVar)
     psc:addReferenceToHigherScope(newGlobalScope, tonumVar)
-
     local outerScope   = Scope:new(psc)
     local envArg       = outerScope:addVariable()
     local unpackArg    = outerScope:addVariable()
@@ -148,11 +112,9 @@ function VMEmitter.emit(bytecodeStr, decodeMap, entryProtoId, opcodePermutation)
     local getmetaArg   = outerScope:addVariable()
     local selectArg    = outerScope:addVariable()
     local argArg       = outerScope:addVariable()
-
     local bytecodVar   = outerScope:addVariable()
     local opmapVar     = outerScope:addVariable()
     local vmVar        = outerScope:addVariable()
-
     local vmScope = Scope:new(outerScope)
     vmScope:addReferenceToHigherScope(outerScope, envArg)
     vmScope:addReferenceToHigherScope(outerScope, unpackArg)
@@ -162,13 +124,11 @@ function VMEmitter.emit(bytecodeStr, decodeMap, entryProtoId, opcodePermutation)
     vmScope:addReferenceToHigherScope(outerScope, selectArg)
     vmScope:addReferenceToHigherScope(outerScope, bytecodVar)
     vmScope:addReferenceToHigherScope(outerScope, opmapVar)
-
     local vmBcArg   = vmScope:addVariable()
     local vmMapArg  = vmScope:addVariable()
     local vmEnvArg  = vmScope:addVariable()
     local vmUnpkArg = vmScope:addVariable()
     local vmArgArg  = vmScope:addVariable()
-
     local decodeScope = Scope:new(vmScope)
     local sbVar    = decodeScope:addVariable()
     local scVar    = decodeScope:addVariable()
@@ -176,21 +136,17 @@ function VMEmitter.emit(bytecodeStr, decodeMap, entryProtoId, opcodePermutation)
     local tcatVar  = decodeScope:addVariable()
     local tinsVar  = decodeScope:addVariable()
     local ssubVar  = decodeScope:addVariable()
-
     decodeScope:addReferenceToHigherScope(newGlobalScope, stringVar)
     decodeScope:addReferenceToHigherScope(newGlobalScope, mathVar)
     decodeScope:addReferenceToHigherScope(newGlobalScope, tableVar)
-
     local rawBcVar   = decodeScope:addVariable()
     local protosVar  = decodeScope:addVariable()
     local entryIdVar = decodeScope:addVariable()
-
     local vmSource = VMEmitter.buildVMSource(k1, k2, k3, k4, O)
-
     return {
         encryptedBytes = encryptedBytes,
         decodeMapStr   = decodeMapStr,
-        xorKey         = k1,   -- kept for compat; real decryptor uses all 4 keys
+        xorKey         = k1,
         vmSource       = vmSource,
         entryProtoId   = entryProtoId,
         newGlobalScope = newGlobalScope,
@@ -198,13 +154,7 @@ function VMEmitter.emit(bytecodeStr, decodeMap, entryProtoId, opcodePermutation)
         __hasVmStrings = true,
     }
 end
-
--- ── VM Source Builder v2 ──────────────────────────────────────────────────────
--- [3] Junk injection  — dead locals at top of VM function
--- [4] CFF             — _dt dispatch table, _pcbox for mutable PC,
---                       _retbox to signal RETURN across closure boundary
 function VMEmitter.buildVMSource(k1, k2, k3, k4, O)
-    -- Safe identifier generator
     local function rn()
         local name = randomStrings and randomStrings.randomString(math.random(8, 14))
                      or ("v" .. math.random(99999))
@@ -215,25 +165,16 @@ function VMEmitter.buildVMSource(k1, k2, k3, k4, O)
         if name:sub(1, 1):match("%d") then name = "_" .. name end
         return name
     end
-
     local vBC      = rn()  local vMap     = rn()  local vEnv     = rn()
     local vUnpk    = rn()  local vArgs    = rn()
     local vSb      = rn()  local vSc      = rn()  local vMf      = rn()
     local vTcat    = rn()  local vTins    = rn()  local vSsub    = rn()
-    local vJ1      = rn()  local vJ2      = rn()  local vJ3      = rn()  -- junk
+    local vJ1      = rn()  local vJ2      = rn()  local vJ3      = rn()
     local vDecBC   = rn()  local vPos     = rn()
     local vRB      = rn()  local vRS      = rn()  local vRI      = rn()  local vRD = rn()
     local vParse   = rn()  local vExec    = rn()  local vProtos  = rn()
     local vUVT     = rn()  local vUVRC    = rn()  local vUVID    = rn()
     local vAllocUV = rn()  local vFreeUV  = rn()
-
-    -- Placeholder counts (for maintenance):
-    --   params 5%s | stdlib 6%s | junk 6%s | decrypt 6%s+4%d | cursor 1%s
-    --   readByte 6%s | readShort 9%s | readInt 15%s | readConst 20%s
-    --   uvtables 16%s | parseProto 14%s | proto cache 6%s
-    --   dispatch 12%s+39%d | entry 3%s
-    --   TOTAL = 125%s + 43%d = 168
-
     local src = string.format([=[
 return function(%s, %s, %s, %s, %s)
     local %s = string.byte
@@ -485,55 +426,42 @@ return function(%s, %s, %s, %s, %s)
     return %s(_entryProto, _initRegs, {})
 end
 ]=],
-        -- params (5)
         vBC, vMap, vEnv, vUnpk, vArgs,
-        -- stdlib (6)
         vSb, vSc, vMf, vTcat, vTins, vSsub,
-        -- junk locals (6 = 3 * {name, vMf})
         vJ1, vMf,   vJ2, vMf,   vJ3, vMf,
-        -- decrypt (6 %s + 4 %d)
         vDecBC,
             k1, k2, k3, k4,
             vBC,
             vSc, vSb, vBC,
         vTcat,
-        -- cursor
         vPos,
-        -- readByte (6)
         vRB, vSb, vDecBC, vPos,  vPos, vPos,
-        -- readShort (9)
         vRS, vSb, vDecBC, vPos,  vSb, vDecBC, vPos,  vPos, vPos,
-        -- readInt (15)
         vRI,
             vSb, vDecBC, vPos,
             vSb, vDecBC, vPos,
             vSb, vDecBC, vPos,
             vSb, vDecBC, vPos,
         vPos, vPos,
-        -- readConst (20)
         vRD,
             vRB, vRB, vRI,
             vSb, vDecBC, vPos,  vPos, vPos,
             vSc, vTcat, vTins, vTcat,
             vRS,  vSsub, vDecBC, vPos, vPos,
         vPos, vPos,
-        -- upvalue alloc/free + fwd declare (16)
         vUVT, vUVRC, vUVID,
         vAllocUV,  vUVID, vUVID,  vUVRC, vUVID,  vUVID,
         vFreeUV,   vUVRC, vUVRC,  vUVRC,  vUVT, vUVRC,
         vExec,
-        -- parseProto (14)
         vParse, vPos,
         vRB, vRB, vRB, vRS,
         vRS, vRD,
         vRS, vRI,
         vRS, vRB,
         vSb, vMap,
-        -- proto cache (6)
         vProtos,
         vRS, vRI, vRI,
         vProtos, vParse,
-        -- dispatch table exec assign (1 %s) + handlers (39 %d + 11 %s)
         vExec,
         O.LOAD_CONST, O.LOAD_BOOL, O.LOAD_NIL, O.MOV,
         O.GET_UPVAL,  vUVT,
@@ -554,11 +482,8 @@ end
             vUVRC, vUVRC,
             vExec,
         O.VARARG, O.ITER_PREP, O.ITER_NEXT,
-        -- entry point (3)
         vProtos, vArgs, vExec
     )
-
     return src
 end
-
 return VMEmitter
